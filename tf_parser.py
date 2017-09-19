@@ -5,6 +5,7 @@ from gensim.utils import deaccent
 import re
 import string
 import numpy as np
+
 def regularize_charset(fname):
     """Reduce the set of characters in the file to the minimum
     to encapsulate its semantics. Replaces non-ascii chars with their 
@@ -24,14 +25,6 @@ def regularize_charset(fname):
         return write_with_suffix(fname, '-ascii')
 
 
-def to_ascii(string):
-    """
-    Replace all non-ascii chars with ascii-equivalent, remove
-    all non-printing characters,replace  all tabs with 4 spaces.
-    
-    Returns:
-        A transformed string
-    """
 def to_ascii(string):
     """
     Replace all non-ascii chars with ascii-equivalent, remove
@@ -94,19 +87,17 @@ def write_with_suffix(f, suffix):
 
 #rev_char_map = {i : c for i, c in char_map.items()}
 
-def make_array(fname, elem_length):
+def make_array(content, elem_length):
     """
-    Take file, process charset, create np array of dim [-1, elem_length]
+    Take text string, process charset, create np array of dim [-1, elem_length]
     """
-    with open(fname, 'r') as f:
-        content = f.read()
-        ascii_content = to_ascii(content)
-        charset = set(ascii_content)
-        char_map = {c : i   for i, c in enumerate(sorted(list(charset)))}
-        substrings = split_text(ascii_content, elem_length)
-        array = np.array([to_digit_array(s, char_map) for s in substrings],
-                         dtype = np.int8)
-        return array, char_map
+    ascii_content = to_ascii(content)
+    charset = set(ascii_content)
+    char_map = {c : i   for i, c in enumerate(sorted(list(charset)))}
+    substrings = split_text(ascii_content, elem_length)
+    array = np.array([to_digit_array(s, char_map) for s in substrings],
+                     dtype = np.uint8)
+    return array, char_map
 
 
 
