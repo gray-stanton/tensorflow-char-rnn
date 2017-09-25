@@ -18,13 +18,6 @@ def build_main_graph(params):
         onehot_label= tf.one_hot(char_label, depth=params['char-map-size'],
                                  dtype=tf.float16, axis=-1,
                                  name='one_hot_label')
-        init_hidden_states = []
-        for i, size in enumerate(params['hidden-layer-sizes']):
-            node = tf.placeholder(tf.float16, shape=[-1, size],
-                                  name='init_hidden_' + str(i))
-            init_hidden_states.append(node)
-        # State unrolling uses tuples
-        init_hidden_states = tuple(init_hidden_states)
     
     hidden_nodes = []
     with tf.name_scope('hidden') as scope:
@@ -33,7 +26,11 @@ def build_main_graph(params):
             hidden_nodes.append(make_rnn_layer(layer_details, size, scope))
     
         multicell = tf.contrib.rnn.MultiRNNCell(hidden_nodes)
-        
+    with tf.name_scope('state_input'):
+        init_hidden_state = tf.placeholder(tf.float16,
+                                       shape = multicell.state_size, 
+                                       name = 'init_hidden_state') 
+    with tf.name_scope('unroll'):
         #outputs:[batch-size, seq-length, hidden-layer-sizes[-1]]
         #final_states = (hidden-layer-sizes[0], hidden-layer-sizes[1], ...)
         outputs, final_states = tf.nn.dynamic_rnn(multicell,
@@ -94,7 +91,15 @@ def build_main_graph(params):
             # TODO: Add translation from chars to text 
             input_chars_summary = tf.summary.tensor_summary(
                 'input_chars_summary', char_input)
-
+        
+        #Wrap up and hold state
+        summaries = tf.summary.merge_all()
+        tf.add_to_collection('training_operations', train_step)
+        tf.add_to_collection('summary_operations', summaries)
+        tf.add_to_collection('states', final_states)
+        global_step_tensor = tf.Variable(
+            0, trainable = False, name='global_step'
+        )
 
 
 def create(model_dir, params, model_name=None):
@@ -106,27 +111,57 @@ def create(model_dir, params, model_name=None):
     with graph.as_default():
         saver = tf.train.Saver()
         build_main_graph(params)
-        summaries = tf.summary.merge_all()
         with tf.Session() as sess:
             # init_op is global_variables_initializer
             sess.run([init_op])
-            saver.save(sess, model_name + '.ckpt')
+            saver.export_meta_graph(model_dir + model_name + '.meta')
+            saver.save(sess, model_dir + model_name + '.ckpt',
+                       write_meta_graph=False)
 
 
 
 
 
 
+def get_init_state(init, batch_size):
+    if init == 'ZERO':
+        return (tf.nn.rnn_cell.MultiRNNCell.zero_state(batch_size,
+                                                      dtype = tf.float16))
 
 
+def train(model_dir, train_params, train_config, batch_iterator ,model_name=None):
+    if model_name is None:
+        model_name = 'my_model'
+        with tf.Session() as sess:
+            try:
+                new_saver = tf.train.import_meta_graph(
+                    model_dir + model_name + '.meta'
+                    )
+            except FileNotFoundError:
+                print('Can not find meta graph')
+            new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
 
-def train():
-    pass
+            train_op = tf.get_collection('training_operations')[0]
+            summary_op = tf.get_collection('summary_operations')[0]
+            state_op = tf.get_collection('states')[0]
+            state = None
+            step = tf.train.get_global_step(sess, 'global_step_tensor')
+            for batch, label in batch_iterator:
+                if state is None:
+                    state = get_init_state(
+                        train_config['state-init'], batch.shape[0]
+                        )
+                feed_dict = {'char_input' : batch, 
+                             'label_input' : label,
+                             'init_hidden_state': state}
+                _, _, state = sess.run([train_op, summary_op, state_op])
+                step += 1
 
 def evaluate():
     pass
 
-
+def generate():
+    pass
 
 
 
