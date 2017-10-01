@@ -87,6 +87,15 @@ def write_with_suffix(f, suffix):
 
 #rev_char_map = {i : c for i, c in char_map.items()}
 
+def translate(content):
+    ascii_content = to_ascii(content)
+    charset = set(ascii_content)
+    char_map = {c : i   for i, c in enumerate(sorted(list(charset)))}
+    translated = np.array([char_map[c] for c in ascii_content],
+                          dtype = np.uint8)
+    return translated, char_map
+
+
 def make_array(content, elem_length):
     """
     Take text string, process charset, create np array of dim [-1, elem_length]
