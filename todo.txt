@@ -1,0 +1,12 @@
+Todo:
+    Rewrite CLI/model to accept/use YAML config files as shared state for model properties
+    Alter running code just a bit so that it can work for any discrete state seq-to-seq problem
+    Write evaluate code that generates sequences and evaluates state freq compared to 
+        source state freq, also want a measure of novelty of generated sequences, to tell
+        if the model is just reproducing existing sequences
+        May also want to evaluate bigram/trigram frequency in addition to single char
+    Alter modelling code to take argument if should be executed on GPU
+    Check to see if my python generator function thing is taking up a lot of time
+        may need to switch to QueueRunner
+    Finish up generated section so it doesnt do that thing
+ 

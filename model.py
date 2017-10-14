@@ -7,9 +7,11 @@ def _get_minimizer(options):
     return tf.train.AdagradOptimizer(learning_rate=options['learning-rate'])
 
 def _make_rnn_layer(num_cells, name, options):
+    if options['activation'] == 'RELU':
+        act = tf.nn.relu
     return tf.contrib.rnn.GRUCell(
         num_cells,
-        activation=options['activation'],
+        activation=act,
     )
 def build_main_graph(params):
     """
@@ -141,6 +143,7 @@ def build_main_graph(params):
         tf.add_to_collection('training_operations', train_step)
         tf.add_to_collection('summary_operations', summaries)
         tf.add_to_collection('summary_operations', mean_loss)
+        tf.add_to_collection('summary_operations', global_step_tensor)
         tf.add_to_collection('states', final_state_stack)
         #tf.add_to_collection('states', init_hidden_states)
         tf.add_to_collection('outputs', char_probs)
@@ -148,11 +151,9 @@ def build_main_graph(params):
         tf.add_to_collection('init_ops', init_op)
 
 
-def create(model_dir, params, model_name=None):
-    if os.listdir(model_dir) != []:
-        raise ValueError('New model directory not empty: {}'.format(model_dir))
-    if model_name is None:
-        model_name = 'my_model'
+def create(model_dir, params, model_name='my_model'):
+    #if os.listdir(model_dir) != []:
+    #    raise ValueError('New model directory not empty: {}'.format(model_dir))
     graph = tf.Graph()
     with graph.as_default():
         build_main_graph(params)
@@ -175,10 +176,8 @@ def get_init_state(n_states, init, batch_size, num_cells):
                 for i in range(0, n_states) ]
         
 
-def train(model_dir, train_config, batch_iterator ,model_name=None):
+def train(model_dir, train_config, batch_iterator, model_name='my_model'):
     print(train_config)
-    if model_name is None:
-        model_name = 'my_model'
     with tf.Session() as sess:
         try:
             new_saver = tf.train.import_meta_graph(
@@ -200,7 +199,8 @@ def train(model_dir, train_config, batch_iterator ,model_name=None):
         state_stack = tf.get_collection('states')[0]
         n_states = int(state_stack.shape[0])
         states = None
-        step = 0 
+        global_step_tensor = tf.get_collection('summary_operations')[2]
+        step = global_step_tensor.eval()
         for batch, label in batch_iterator:
             if states is None:
                 states = get_init_state(
@@ -215,6 +215,7 @@ def train(model_dir, train_config, batch_iterator ,model_name=None):
                         }
 
             for i in range(2, n_states + 2):
+                #State placeholders start at input_placeholders[2]
                 feed_dict[input_placeholders[i]] = states[i-2]
 
             _, summary, state_stack_output = sess.run(
@@ -222,11 +223,12 @@ def train(model_dir, train_config, batch_iterator ,model_name=None):
             )
             states = [state_stack_output[i] for  i in range(0, state_stack.shape[0])]
             step += 1
-            if step % train_config['report-freq']:
+            if step % train_config['report-freq'] == 0:
                 print(step)
                 train_writer.add_summary(summary, step)
 
 
+        tf.assign(global_step_tensor, step)
         new_saver.save(sess, model_dir + model_name, global_step = step)
 
 
@@ -235,13 +237,15 @@ def evaluate():
 
 
 def softmax_sample(probs, temperature=1.0):
-    scaled_probs = np.log(probs)/ temperature
-    scaled_probs = np.exp(scaled_probs) / np.sum(np.exp(scaled_probs))
-    return np.argmax(np.random.multinomial(1, scaled_probs, 1))
+    scaled_probs = np.exp(probs/temperature)/np.sum(np.exp(probs/temperature))
+    return np.random.choice(
+        [i for i in range(0, len(scaled_probs))],
+        p = scaled_probs)
 
-def generate(model_dir, seed_text, gen_length, generate_config, model_name=None):
-    if model_name is None:
-        model_name = 'my_model'
+                                                        
+
+def generate(model_dir, seed_text, gen_length, generate_config,
+             model_name='my_model'):
         with tf.Session() as sess:
             try:
                 new_saver = tf.train.import_meta_graph(
@@ -251,7 +255,9 @@ def generate(model_dir, seed_text, gen_length, generate_config, model_name=None)
                 print('Can not find meta graph')
             new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
             char_probs = tf.get_collection('outputs')[0]
-            state_op = tf.get_collection('states')[0]
+            state_stack_op = tf.get_collection('states')[0]
+            n_states = int(state_stack_op.shape[0])
+            input_placeholders = tf.get_collection('input_placeholders')
             pad_length = generate_config['seq-length'] - len(seed_text)
             #Pad with spaces up to expected sequence length
             
@@ -259,29 +265,49 @@ def generate(model_dir, seed_text, gen_length, generate_config, model_name=None)
             seq_length = generate_config['seq-length']
             pad_length = seq_length - len(seed_text)
             prompt = np.array([
-                *[char_map[' '] for i in range(0, pad_length)],
-                *[char_map[c] for c in seed_text]])
+                #Pad strings with ascii spaces mapped with char_map
+                *[char_map[ord(' ')] for i in range(0, pad_length)],
+                #Pad strings with ascii spaces mapped with char_map
+                *[char_map[c] for c in seed_text]]).reshape(1,seq_length)
 
-            state = None
+            states = None
             for i in range(0, gen_length):
-                if state is None:
-                    state = get_init_state( generate_config['state-init'], 1) 
-                    feed_dict = {'char_input:0' : prompt,
-                                 'label_input:0' : np.zeroes(
-                                 (1, seq_length)),
-                             'init_hidden_state' : state
+                if states is None:
+                    states = get_init_state(
+                        n_states,
+                        generate_config['state-init'],
+                        1,
+                        num_cells = generate_config['shapes'] #FIXME info leak
+                        )
+
+
+                    feed_dict = {input_placeholders[0] : prompt,
+                                 input_placeholders[1]: np.zeros(
+                                 (1, seq_length)).reshape(1, seq_length),
                             }
-                probs, state = sess.run([char_probs, state_stack_op])
-                last_char_probs = probs[1, seq_length, :]
-                next_char = generate_config['inv-char-map'][ softmax_sample(
+
+                for i in range(2, n_states + 2):
+                    #State placeholders start at input_placeholders[2]
+                    feed_dict[input_placeholders[i]] = states[i-2]
+                probs, state_stack_output = sess.run([char_probs,
+                                                      state_stack_op],
+                                                     feed_dict)
+                states = [state_stack_output[i] for  i in range(0,
+                                                                state_stack_op.shape[0])]
+                last_char_probs = probs[0, seq_length - 1, :]
+                next_char = chr(generate_config['inv-char-map'][ softmax_sample(
                     last_char_probs, generate_config['temperature']
-                    )
-                ]
+                    )])
 
                 if i <= pad_length:
-                    state = None # still in paded regime, reset state to 0
-                prompt = prompt[1:] + [next_char]
-                print(prompt)
+                    states = None # still in paded regime, reset state to 0
+                old_text = ''.join([chr(generate_config['inv-char-map'][p]) for p in
+                                    list(prompt[0, :])])
+                print(old_text)
+                new_text = old_text[1:] + next_char
+                prompt = np.array([char_map[ord(c)] for c in new_text]).reshape(
+                    1, seq_length)
+                print(new_text)
 
 
                 

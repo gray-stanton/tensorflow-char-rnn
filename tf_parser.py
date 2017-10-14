@@ -38,7 +38,8 @@ def to_ascii(string):
     car_return_etc = re.compile('\r|\x0b|\x0c')
     newstring, _ = tabs.subn('\n', newstring)
     newstring = deaccent(newstring)
-    nonprintable = re.compile('[^ -~]')
+    #FIXME removes newlines, not intended behavior
+    nonprintable = re.compile('[^ -~\n]')
     newstring, _ = nonprintable.subn('', newstring)
     return newstring.encode('ascii')
 
