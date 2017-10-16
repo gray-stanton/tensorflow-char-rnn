@@ -4,9 +4,11 @@ import os
 #from tensorflow.framework
 
 def _get_minimizer(options):
-    return tf.train.AdagradOptimizer(learning_rate=options['learning-rate'])
+    return tf.train.AdagradOptimizer(learning_rate=options['learn-rate'])
 
 def _make_rnn_layer(num_cells, name, options):
+    #TODO: Add additional options
+    act = tf.nn.relu
     if options['activation'] == 'RELU':
         act = tf.nn.relu
     return tf.contrib.rnn.GRUCell(
@@ -151,16 +153,26 @@ def build_main_graph(params):
         tf.add_to_collection('init_ops', init_op)
 
 
-def create(model_dir, params, model_name='my_model'):
-    #if os.listdir(model_dir) != []:
-    #    raise ValueError('New model directory not empty: {}'.format(model_dir))
+def create(model_dict):
+    try:    
+        model_dir = model_dict['model-dir']
+        model_name = model_dict['model-name']
+    except KeyError as e:
+        print('Necessary configs not found!')
+        print(model_dict)
+        raise e
+    metagraph_name = model_dir + model_name + '.meta'
+    if metagraph_name in os.listdir(model_dir):
+        raise ValueError('{} already contains a model!'.format(model_dir))
     graph = tf.Graph()
     with graph.as_default():
-        build_main_graph(params)
+        build_main_graph(model_dict)
         saver = tf.train.Saver()
         with tf.Session() as sess:
+            #Run initialization, confirm graph build correctly
             init_op = tf.get_collection('init_ops')[0]
             sess.run([init_op])
+            #Save graph for training
             saver.export_meta_graph(model_dir + model_name + '.meta')
             saver.save(sess, model_dir + model_name + '.ckpt',
                        write_meta_graph=False)
@@ -170,43 +182,58 @@ def create(model_dir, params, model_name='my_model'):
 
 
 
-def get_init_state(n_states, init, batch_size, num_cells):
+def get_init_state(layer_sizes, init, batch_size, num_cells):
+    """Initialize RNN state"""
     if init == 'ZERO':
-        return [ np.zeros(dtype = np.float16, shape = (batch_size, num_cells[i]))
-                for i in range(0, n_states) ]
+        return [ np.zeros(dtype = np.float16, shape = (batch_size, s))
+                for s in layer_sizes ]
         
 
-def train(model_dir, train_config, batch_iterator, model_name='my_model'):
-    print(train_config)
+def train(model_dict, batch_iterator):
+    print(model_dict)
+    try:
+        model_name = model_dict['model-name']
+        model_dir = model_dict['model-dir']
+        layer_sizes = model_dict['hidden-layer-sizes']
+        state_init = model_dict['state-init']
+    except KeyError as e:
+        print('Necessary configs not found!')
+        print(model_dict)
+        raise e
+
     with tf.Session() as sess:
+        #Load previously created graph
         try:
             new_saver = tf.train.import_meta_graph(
                 model_dir + model_name + '.meta'
                 )
-        except FileNotFoundError:
-            print('Can not find meta graph')
-        new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
-        print('restored!')
+        except FileNotFoundError as e:
+            print('Can not find metagraph in {}'.format(model_dir))
+            raise e
 
+        ## Setup/Extract ops from graph
+        new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
+        print('Restored!')
+        #Initialize log writer for tensorboard
+        train_writer = tf.summary.FileWriter(
+            model_dir + '/train_logs', sess.graph
+        )
         train_op = tf.get_collection('training_operations')[0]
         summary_op = tf.get_collection('summary_operations')[0]
-        train_writer = tf.summary.FileWriter(model_dir + '/train_logs',
-                                             sess.graph)
-
         input_placeholders = tf.get_collection('input_placeholders')
-    
-        print(input_placeholders)
-        state_stack = tf.get_collection('states')[0]
-        n_states = int(state_stack.shape[0])
-        states = None
+
         global_step_tensor = tf.get_collection('summary_operations')[2]
         step = global_step_tensor.eval()
+
+        state_stack = tf.get_collection('states')[0]
+        states = None
+        #TRAIN LOOP
         for batch, label in batch_iterator:
             if states is None:
                 states = get_init_state(
-                    n_states,
-                    train_config['state-init'], batch.shape[0],
-                    num_cells = train_config['shapes'] #FIXME info leak
+                    sizes = layer_sizes,
+                    init = state_init,
+                    batch_size = batch.shape[0],
                     )
 
 
@@ -214,7 +241,7 @@ def train(model_dir, train_config, batch_iterator, model_name='my_model'):
                          input_placeholders[1] : label, # char_label
                         }
 
-            for i in range(2, n_states + 2):
+            for i in range(2, len(layer_sizes) + 2):
                 #State placeholders start at input_placeholders[2]
                 feed_dict[input_placeholders[i]] = states[i-2]
 
@@ -244,83 +271,98 @@ def softmax_sample(probs, temperature=1.0):
 
                                                         
 
-def generate(model_dir, seed_text, gen_length, generate_config,
-             model_name='my_model'):
-        with tf.Session() as sess:
-            try:
-                new_saver = tf.train.import_meta_graph(
-                    model_dir + model_name + '.meta'
+def generate(model_dict, seed_text):
+    try: 
+        model_name = model_dict['model-name']
+        model_dir = model_dict['model-dir']
+        layer_sizes = model_dict['hidden-layer-sizes']
+        state_init = model_dict['state-init']
+        char_map = model_dict['char-map']
+        inv_char_map = model_dict['inv-char-map']
+        seq_length = model_dict['seq-length']
+        temp = model_dict['temp']
+    except KeyError as e:
+        print('Necessary configs not found!')
+        print(model_dict)
+        raise e
+    with tf.Session() as sess:
+        try:
+            new_saver = tf.train.import_meta_graph(
+                model_dir + model_name + '.meta'
+                )
+        except FileNotFoundError as e:
+            print('Can not find metagraph in {}'.format(model_dir))
+            raise e
+        #Setup and extract necessary ops
+        new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
+        char_probs = tf.get_collection('outputs')[0]
+        state_stack_op = tf.get_collection('states')[0]
+        input_placeholders = tf.get_collection('input_placeholders')
+
+        #Pad with spaces up to expected sequence length
+        pad_length = seq_length - len(seed_text)
+        prompt = np.array([
+            #Pad strings with ascii spaces mapped with char_map
+            *[char_map[ord(' ')] for i in range(0, pad_length)],
+            #Pad strings with ascii spaces mapped with char_map
+            *[char_map[c] for c in seed_text]]).reshape(1,seq_length)
+        states = None
+
+        #Generate LOOP
+        for i in range(0, gen_length):
+            if states is None:
+                states = get_init_state(
+                    sizes = layer_sizes,
+                    init = state_init,
+                    batch_size = 1,
                     )
-            except FileNotFoundError:
-                print('Can not find meta graph')
-            new_saver.restore(sess, tf.train.latest_checkpoint(model_dir))
-            char_probs = tf.get_collection('outputs')[0]
-            state_stack_op = tf.get_collection('states')[0]
-            n_states = int(state_stack_op.shape[0])
-            input_placeholders = tf.get_collection('input_placeholders')
-            pad_length = generate_config['seq-length'] - len(seed_text)
-            #Pad with spaces up to expected sequence length
+
+                feed_dict = {
+                    input_placeholders[0] : prompt,
+                    input_placeholders[1] : (
+                        np.zeros( (1, seq_length)).reshape(1, seq_length)),
+                        }
+            for i in range(2, n_states + 2):
+                #State placeholders start at input_placeholders[2]
+                feed_dict[input_placeholders[i]] = states[i-2]
+
+            probs, state_stack_output = sess.run([char_probs,
+                                                  state_stack_op],
+                                                 feed_dict)
+            states = [state_stack_output[i]
+                      for i in range(0, state_stack_op.shape[0])]
+            last_char_probs = probs[0, seq_length - 1, :]
+            #Sample with sofmax temp from char dist
+            #then run through inv_char_map to gen next char
+            next_char = chr(
+                inv_char_map[ 
+                    softmax_sample(last_char_probs, temp)]
+            )
+
+            if i <= pad_length:
+                states = None # still in paded regime, reset state to 0
+            old_text = ''.join([inv_char_map[p]
+                                for p in list(prompt[0, :])]
+            )
+            print(old_text)
+            new_text = old_text[1:] + next_char
+            prompt = np.array(
+                [char_map[ord(c)] for c in new_text]).reshape(
+                1, seq_length)
+            print(new_text)
+
+
             
-            char_map = generate_config['char-map']
-            seq_length = generate_config['seq-length']
-            pad_length = seq_length - len(seed_text)
-            prompt = np.array([
-                #Pad strings with ascii spaces mapped with char_map
-                *[char_map[ord(' ')] for i in range(0, pad_length)],
-                #Pad strings with ascii spaces mapped with char_map
-                *[char_map[c] for c in seed_text]]).reshape(1,seq_length)
-
-            states = None
-            for i in range(0, gen_length):
-                if states is None:
-                    states = get_init_state(
-                        n_states,
-                        generate_config['state-init'],
-                        1,
-                        num_cells = generate_config['shapes'] #FIXME info leak
-                        )
 
 
-                    feed_dict = {input_placeholders[0] : prompt,
-                                 input_placeholders[1]: np.zeros(
-                                 (1, seq_length)).reshape(1, seq_length),
-                            }
-
-                for i in range(2, n_states + 2):
-                    #State placeholders start at input_placeholders[2]
-                    feed_dict[input_placeholders[i]] = states[i-2]
-                probs, state_stack_output = sess.run([char_probs,
-                                                      state_stack_op],
-                                                     feed_dict)
-                states = [state_stack_output[i] for  i in range(0,
-                                                                state_stack_op.shape[0])]
-                last_char_probs = probs[0, seq_length - 1, :]
-                next_char = chr(generate_config['inv-char-map'][ softmax_sample(
-                    last_char_probs, generate_config['temperature']
-                    )])
-
-                if i <= pad_length:
-                    states = None # still in paded regime, reset state to 0
-                old_text = ''.join([chr(generate_config['inv-char-map'][p]) for p in
-                                    list(prompt[0, :])])
-                print(old_text)
-                new_text = old_text[1:] + next_char
-                prompt = np.array([char_map[ord(c)] for c in new_text]).reshape(
-                    1, seq_length)
-                print(new_text)
-
-
-                
-
-
-
-
-
-                
 
 
 
             
+
+
+
+        
 
 
 

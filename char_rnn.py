@@ -41,6 +41,116 @@ import os
 import pickle
 import numpy as np
 import math
+from yaml import load, dump
+
+def _arg_parse(docopt_dict, model_dict = None):
+    """ 
+    Extract entries from docopt dict, return correctly-typed model config
+    dict. If model_dict already exists, update/overwrite.
+
+    """
+    if model_dict == None:
+        model_dict = {}
+
+    for k, v in docopt_dict.items():
+        nkey, nval = _parse(k, v)
+        if nkey in model_dict:
+            print('Overwriting {} with {} from {}'.format(nkey, nval, v))
+        model_dict[nkey] = nval
+    return model_dict
+
+
+def _pack(model_dict):
+    model_dict['minimizer-options'] = {
+        'learn-rate' : model_dict['learn-rate']
+    }
+    del model_dict['learn-rate']
+    n_layers = len(model_dict['hidden-layer-sizes'])
+    model_dict['hidden-layer-details'] = [
+        {'activation' : a} for a in range(1, n_layers)]
+    del model_dict['activation']
+
+    return model_dict
+
+def _parse(key, value):
+    """Parses a key value pair into the correct type
+    Handles: '--model-name', '--dir', '--layers', '--activation'
+       '--state-init', '--report-freq', '--seedtext', '--gen-length',
+       '--shapes', '--temp', '--nepoch', '--batch-size'
+    """
+
+    def _nonneg_check(x):
+        if x < 0:
+            raise ValueError(
+                'Numeric config arguments must be >=0!'
+            )
+    if value is None:
+        return key, value
+    elif key == '--dir':
+        nkey = 'model-dir'
+        nvalue = os.path.abspath(value) + '/' 
+    elif key == '--model-name':
+        nkey = 'model-name'
+        nvalue = value
+    elif key == '--seq-length':
+        nkey = 'seq-length'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--learn-rate':
+        nkey = 'learn-rate'
+        nvalue = float(value)
+        _nonneg_check(nvalue)
+    elif key == '--activation':
+        nkey = 'activation'
+        nvalue = value
+    elif key == '--layers':
+        nkey = 'hidden-layer-sizes'
+        nvalue = [int(v) for v in value]
+        [_nonneg_check(x) for x in nvalue]
+    elif key == '--report-freq':
+        nkey = 'report-freq'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--state-init':
+        nkey = 'state-init'
+        nvalue = value
+    elif key == '<iterations>':
+        nkey = 'train-iter'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--nepoch':
+        nkey = 'train-epochs'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--batch-size':
+        nkey = 'batch-size'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--gen-length':
+        nkey = 'gen-length'
+        nvalue = int(value)
+        _nonneg_check(nvalue)
+    elif key == '--temp':
+        nkey = 'temperature'
+        nvalue = float(value)
+        _nonneg_check(nvalue)
+    elif key == '<file>' :
+        nkey = 'raw-file'
+        nvalue = os.path.abspath(value)
+    elif key == '<seed-text>':
+        nkey = 'seed'
+        nvalue = value
+    else:
+        nkey = key
+        nvalue = value
+        print('Unknown key: {}'.format(key))
+    
+    return nkey, nvalue
+
+
+
+
+
 def _make_batch_iterator(arr, length, batch_size, niter, nepoch):
     for e in range(0, nepoch):
         n_batches_per_epoch = math.floor(len(arr)/(batch_size * length))
@@ -66,117 +176,97 @@ def _make_batch_iterator(arr, length, batch_size, niter, nepoch):
 
 
 if __name__ == '__main__':
-    arguments = docopt(__doc__, version = 'char_rnn 0.1')
-    print(arguments)
-    if arguments['create']:
+    docopt_dict= docopt(__doc__, version = 'char_rnn 0.1')
+    print(docopt_dict)
+    if docopt_dict['create']:
         #Parse arguments into variables
-        model_name = arguments['--model-name']
-        model_dir  = os.path.abspath(arguments['--dir']) + '/'
-        try:
-            seq_length = int(arguments['--seq-length'])
-            layer_sizes = [int(s) for s in arguments['--layers']]
-            learn_rate = float(arguments['--learn-rate'])
-        except Exception as e:
-            print('Non-numeric argument!')
-            raise e
-        activations = [arguments['--activation']] * len(layer_sizes)
-        
+        model_dict = _arg_parse(docopt_dict, None)
+        model_dict = _pack(model_dict)
+        seq_length = model_dict['seq-length']
         #Open character input file and translate
         try:
-            with open(arguments['<file>'], 'r') as inputf:
+            with open(model_dict['raw-file'], 'r') as inputf:
                 content = inputf.read()
-        except Exception as e:
+        except (IOError, FileNotFoundError) as e:
             raise e
             
         serial, char_map = tf_parser.translate(content)
         inv_char_map = {v : k for k, v in char_map.items()}
-        np.save(model_dir + model_name, serial)
-        with open(model_dir + model_name + '.char_map', 'wb') as map_f:
-            pickle.dump(char_map, map_f)
-        with open(model_dir + model_name + '.inv_map', 'wb') as inv_f:
-            pickle.dump(inv_char_map, inv_f)
+        model_dict['char-map'] = char_map
+        model_dict['inv-char-map'] = inv_char_map
+        model_dict['char-map-size'] = len(char_map)
+        #TODO: Add config options for label-length < seq-length
+        model_dict['label-length'] = seq_length
 
-        config = {
-            'seq-length' : seq_length, 
-            'char-map-size' : len(char_map),
-            'label-length' : seq_length,
-            'hidden-layer-sizes' : layer_sizes,
-            'hidden-layer-details' : [{'activation' : a} for a in activations],
-            'minimizer-options' : {'learning-rate' : learn_rate}
-        }
-        print(config)
 
-        model.create(model_dir, config, model_name)
+        #Build graph and save metagraph etc.
+        model.create(model_dict)
+       
+       #Save data and configuration
+        model_dict['data-file'] = model_dir + model_name + '.npy'
+        model_dict['config-file'] = model_dir + model_name + '_config.yaml'
 
-    if arguments['train']:
-        model_name = arguments['--model-name']
-        model_dir  = os.path.abspath(arguments['--dir']) + '/'
+        np.save(model_dict['data-file'], serial)
+        with open(model_dict['config-file'], 'w') as yamlfile:
+            yaml.dump(model_dict, yamlfile)
+
+    if docopt_dict['train']:
+        model_name = docopt_dict['--model-name']
+        model_dir  = os.path.abspath(docopt_dict['--dir']) + '/'
+        config_file = model_dir + model_name + '_config.yaml'
         try:
-            seq_length = int(arguments['--seq-length'])
-            layer_sizes = [int(s) for s in arguments['--shapes']]
-            report_freq = int(arguments['--report-freq'])
-            niter = int(arguments['<iterations>'])
-            nepoch = int(arguments['--nepoch'])
-            batch_size = int(arguments['--batch-size'])
-        except Exception as e:
-            print('Non-numeric argument!')
+            with open(config_file, 'r') as yamlfile:
+                old_model_dict = yaml.load(yamlfile)
+        except (IOError, FileNotFoundError) as e:
+            print('Cannot find {}'.format(config_file))
             raise e
-        state_init = arguments['--state-init']
-
+        model_dict = _arg_parse(docopt_dict, old_model_dict)
 
         #Load datafile
         try:
-            serial = np.load(model_dir + model_name + '.npy')
-        except Exception as e:
-            print('Cannot find data file!')
+            serial = np.load(model_dict['data-file'])
+        except (IOError, FileNotFoundError) as e:
+            print('Cannot find data file {}!'.format(model_dict['data-file']))
             raise e
 
+        #Create iterator for number of batches
+        #TODO: Test to see if should switch to QueueRunners
         batch_iterator = _make_batch_iterator(
-            serial, seq_length, batch_size, niter, nepoch)
+            serial,
+            model_dict['seq-length'],
+            model_dict['batch_size'],
+            model_dict['train-iter'],
+            model_dict['train-epochs'])
 
-        config = {
-            'report-freq' : report_freq,
-            'state-init' : state_init,
-            'shapes' : layer_sizes,
-        }
 
-        model.train(model_dir, config, batch_iterator, model_name)
+        #Run model training loop
+        model.train(model_dict, batch_iterator)
 
-    if arguments['generate']:
-        model_name = arguments['--model-name']
-        model_dir  = os.path.abspath(arguments['--dir']) + '/'
+        #Update configuration file
+        with open(model_dict['config-file'], 'w') as yamlfile:
+            yaml.dump(model_dict, yamlfile)
+
+    if docopt_dict['generate']:
+        model_name = docopt_dict['--model-name']
+        model_dir  = os.path.abspath(docopt_dict['--dir']) + '/'
+        config_file = model_dir + model_name + '_config.yaml'
         try:
-            seq_length = int(arguments['--seq-length'])
-            layer_sizes = [int(s) for s in arguments['--shapes']]
-            gen_length = int(arguments['--gen-length'])
-            temp = float(arguments['--temp'])
-        except Exception as e:
-            print('Non-numeric argument!')
+            with open(config_file, 'r') as yamlfile:
+                old_model_dict = yaml.load(yamlfile)
+        except (IOError, FileNotFoundError) as e:
+            print('Cannot find {}'.format(config_file))
             raise e
-        state_init = arguments['--state-init']
-        seed_text  = arguments['<seed-text>']
+        model_dict = _arg_parse(docopt_dict, old_model_dict)
+
         #Must be run through same transformation as raw text
-        seed_text = tf_parser.to_ascii(seed_text)
+        seed_text = tf_parser.to_ascii(model_dict['seed'])
         
-        try:
-            with open(model_dir + model_name + '.char_map', 'rb') as char_f:
-                char_map = pickle.load(char_f)
-            with open(model_dir + model_name + '.inv_map', 'rb') as inv_f:
-                inv_map = pickle.load(inv_f)
-        except Exception as e:
-            print('Can not find char_map!')
-            raise e
 
-        config = {
-            'seq-length' : seq_length,
-            'char-map' : char_map,
-            'inv-char-map' : inv_map,
-            'state-init' : state_init,
-            'temperature' : temp,
-            'shapes' : layer_sizes
-        }
-        model.generate(model_dir, seed_text, gen_length, config, model_name)
+        model.generate(model_dict, seed_text)
 
+        #Update configuration file
+        with open(model_dict['config-file'], 'w') as yamlfile:
+            yaml.dump(model_dict, yamlfile)
 
 
 
