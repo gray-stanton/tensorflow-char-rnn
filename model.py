@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import os
+from scipy.misc import logsumexp
 #from tensorflow.framework
 
 def _get_minimizer(options):
@@ -66,6 +67,8 @@ def build_main_graph(params):
     with tf.name_scope('unroll'):
         #outputs:[batch-size, seq-length, hidden-layer-sizes[-1]]
         #final_states = (hidden-layer-sizes[0], hidden-layer-sizes[1], ...)
+        print(init_hidden_states)
+        print(multicell)
         outputs, final_states = tf.nn.dynamic_rnn(multicell,
                                                  onehot_input,
                                                  initial_state=init_hidden_states,
@@ -182,7 +185,7 @@ def create(model_dict):
 
 
 
-def get_init_state(layer_sizes, init, batch_size, num_cells):
+def get_init_state(layer_sizes, init, batch_size):
     """Initialize RNN state"""
     if init == 'ZERO':
         return [ np.zeros(dtype = np.float16, shape = (batch_size, s))
@@ -196,6 +199,7 @@ def train(model_dict, batch_iterator):
         model_dir = model_dict['model-dir']
         layer_sizes = model_dict['hidden-layer-sizes']
         state_init = model_dict['state-init']
+        print(layer_sizes)
     except KeyError as e:
         print('Necessary configs not found!')
         print(model_dict)
@@ -231,7 +235,7 @@ def train(model_dict, batch_iterator):
         for batch, label in batch_iterator:
             if states is None:
                 states = get_init_state(
-                    sizes = layer_sizes,
+                    layer_sizes = layer_sizes,
                     init = state_init,
                     batch_size = batch.shape[0],
                     )
@@ -250,7 +254,7 @@ def train(model_dict, batch_iterator):
             )
             states = [state_stack_output[i] for  i in range(0, state_stack.shape[0])]
             step += 1
-            if step % train_config['report-freq'] == 0:
+            if step % model_dict['report-freq'] == 0:
                 print(step)
                 train_writer.add_summary(summary, step)
 
@@ -264,7 +268,10 @@ def evaluate():
 
 
 def softmax_sample(probs, temperature=1.0):
-    scaled_probs = np.exp(probs/temperature)/np.sum(np.exp(probs/temperature))
+    #Evaluate in log-scale to avoid numeric issues if T << 1 or >> 1
+    lse = logsumexp(probs/temperature)
+    log_scaled_probs = probs/temperature - lse
+    scaled_probs = np.exp(log_scaled_probs)
     return np.random.choice(
         [i for i in range(0, len(scaled_probs))],
         p = scaled_probs)
@@ -280,7 +287,8 @@ def generate(model_dict, seed_text):
         char_map = model_dict['char-map']
         inv_char_map = model_dict['inv-char-map']
         seq_length = model_dict['seq-length']
-        temp = model_dict['temp']
+        temp = model_dict['temperature']
+        gen_length = model_dict['gen-length']
     except KeyError as e:
         print('Necessary configs not found!')
         print(model_dict)
@@ -307,12 +315,13 @@ def generate(model_dict, seed_text):
             #Pad strings with ascii spaces mapped with char_map
             *[char_map[c] for c in seed_text]]).reshape(1,seq_length)
         states = None
+        print(prompt)
 
         #Generate LOOP
         for i in range(0, gen_length):
             if states is None:
                 states = get_init_state(
-                    sizes = layer_sizes,
+                    layer_sizes = layer_sizes,
                     init = state_init,
                     batch_size = 1,
                     )
@@ -322,7 +331,7 @@ def generate(model_dict, seed_text):
                     input_placeholders[1] : (
                         np.zeros( (1, seq_length)).reshape(1, seq_length)),
                         }
-            for i in range(2, n_states + 2):
+            for i in range(2, len(layer_sizes)+ 2):
                 #State placeholders start at input_placeholders[2]
                 feed_dict[input_placeholders[i]] = states[i-2]
 
@@ -341,10 +350,9 @@ def generate(model_dict, seed_text):
 
             if i <= pad_length:
                 states = None # still in paded regime, reset state to 0
-            old_text = ''.join([inv_char_map[p]
+            old_text = ''.join([chr(inv_char_map[p])
                                 for p in list(prompt[0, :])]
             )
-            print(old_text)
             new_text = old_text[1:] + next_char
             prompt = np.array(
                 [char_map[ord(c)] for c in new_text]).reshape(

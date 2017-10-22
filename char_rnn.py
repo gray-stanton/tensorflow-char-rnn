@@ -5,13 +5,13 @@ Usage:
    char_rnn.py create (--dir=<model-dir>) (--layers=<layer-sizes> ...)
                       (--seq-length=<seq-length>) [--activation=<activation>]
                       [--learn-rate=<learn-rate>] [--model-name=<name>] <file>
-   char_rnn.py train  (--dir=<model-dir>) (--seq-length=<seq-length>) 
-                      (--shapes=<shapes> ...) (--batch-size=<batch-size>)
+   char_rnn.py train  (--dir=<model-dir>) 
+                      (--batch-size=<batch-size>) [--use-gpu]
                       [--state-init=<state-init>] [--report-freq=<freq>]
                       [--model-name <name>]
                       [--nepoch=<nepoch>] <iterations>
-   char_rnn.py generate (--dir=<model-dir>) (--seq-length=<seq-length>)
-                        (--gen-length=<length>) (--shapes=<shapes> ...) 
+   char_rnn.py generate (--dir=<model-dir>)
+                        (--gen-length=<length>)
                         [--state-init <state-init>] [--model-name <name>]
                         [--temp=<temp>] <seed-text>
    char_rnn.py (-h | --help)
@@ -22,7 +22,7 @@ Options:
     --layers <layer-sizes> ... -l <layer-sizes>...  RNN layer sizes
     --activation <activation>  RNN Activation function [default: RELU]
     --learn-rate <learn-rate>  Learning rate [default: 0.1]
-    --seq-length <seq-length> -s <seq-length>  Truncated backprop length
+   --seq-length <seq-length> -s <seq-length>  Truncated backprop length
     --model-name <name> -n <name>  Model name [default: my_model]
     --state-init <state-init>  Initialization type of RNN state [default: ZERO]
     --report-freq <freq> -f <freq>  Report frequency [default: 1]
@@ -31,8 +31,8 @@ Options:
     --shapes <shapes>  Model layer sizes FIX
     --temp <temp> -t <temp>  Softmax temperature for gen [default: 1]
     --nepoch <nepoch> -e  Number of epochs [default: 1]
-    --batch-size <batch-size> -b <batch-size>  Minibatch size 
-
+    --batch-size <batch-size> -b <batch-size>  Minibatch size
+    --use-gpu  Whether or not to utilize system GPU
 """
 from docopt import docopt
 import tf_parser
@@ -41,7 +41,8 @@ import os
 import pickle
 import numpy as np
 import math
-from yaml import load, dump
+
+import yaml
 
 def _arg_parse(docopt_dict, model_dict = None):
     """ 
@@ -55,8 +56,12 @@ def _arg_parse(docopt_dict, model_dict = None):
     for k, v in docopt_dict.items():
         nkey, nval = _parse(k, v)
         if nkey in model_dict:
-            print('Overwriting {} with {} from {}'.format(nkey, nval, v))
-        model_dict[nkey] = nval
+            if nval:
+                #Don't want to overwrite empty list etc. #FIXME
+                print('Overwriting {} with {} from {}'.format(nkey, nval, v))
+                model_dict[nkey] = nval
+        else:
+            model_dict[nkey] = nval
     return model_dict
 
 
@@ -67,7 +72,7 @@ def _pack(model_dict):
     del model_dict['learn-rate']
     n_layers = len(model_dict['hidden-layer-sizes'])
     model_dict['hidden-layer-details'] = [
-        {'activation' : a} for a in range(1, n_layers)]
+        {'activation' : a} for a in range(0, n_layers)]
     del model_dict['activation']
 
     return model_dict
@@ -89,6 +94,9 @@ def _parse(key, value):
     elif key == '--dir':
         nkey = 'model-dir'
         nvalue = os.path.abspath(value) + '/' 
+    elif key == '--use-gpu':
+        nkey = 'gpu'
+        nvalue = value
     elif key == '--model-name':
         nkey = 'model-name'
         nvalue = value
@@ -191,7 +199,7 @@ if __name__ == '__main__':
             raise e
             
         serial, char_map = tf_parser.translate(content)
-        inv_char_map = {v : k for k, v in char_map.items()}
+        inv_char_map = {v : chr(k) for k, v in char_map.items()}
         model_dict['char-map'] = char_map
         model_dict['inv-char-map'] = inv_char_map
         model_dict['char-map-size'] = len(char_map)
@@ -200,9 +208,12 @@ if __name__ == '__main__':
 
 
         #Build graph and save metagraph etc.
+
         model.create(model_dict)
-       
-       #Save data and configuration
+         
+        #Save data and configuration
+        model_dir = model_dict['model-dir']
+        model_name = model_dict['model-name']
         model_dict['data-file'] = model_dir + model_name + '.npy'
         model_dict['config-file'] = model_dir + model_name + '_config.yaml'
 
@@ -234,7 +245,7 @@ if __name__ == '__main__':
         batch_iterator = _make_batch_iterator(
             serial,
             model_dict['seq-length'],
-            model_dict['batch_size'],
+            model_dict['batch-size'],
             model_dict['train-iter'],
             model_dict['train-epochs'])
 
